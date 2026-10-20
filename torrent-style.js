@@ -3,16 +3,17 @@
     'use strict';
 
     var KEY = 'LampaTorrentStyle';
-    var VERSION = '1.0.0';
+    var VERSION = '1.0.1';
     var STYLE_ID = 'lampa-torrent-style-css';
     var ATTRIBUTE = 'data-lts';
     var config = {
         seedsLow: 5,
         seedsHigh: 20,
-        bitrateMedium: 50,
-        bitrateHigh: 100,
-        sizeMediumGB: 50,
-        sizeHighGB: 200,
+        bitrateMedium: 20,
+        bitrateHigh: 50,
+        sizeLowGB: 5,
+        sizeMediumGB: 10,
+        sizeHighGB: 25,
         updateDelay: 80
     };
 
@@ -103,7 +104,7 @@
         each(item.querySelectorAll('.torrent-item__size'), function (element)
         {
             var value = sizeGB(text(element));
-            mark(element, value === null ? null : value >= config.sizeHighGB ? 'red' : value >= config.sizeMediumGB ? 'purple' : 'green');
+            mark(element, value === null ? null : value >= config.sizeHighGB ? 'red' : value >= config.sizeMediumGB ? 'amber' : value >= config.sizeLowGB ? 'blue' : 'green');
         });
 
         var existing = item.querySelectorAll('.torrent-item__ffprobe .m-resolution');
