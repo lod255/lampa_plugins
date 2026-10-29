@@ -50,16 +50,40 @@
         s.data.translate.tracks = s.tracks;
         originalTracks.call(L.PlayerPanel, s.tracks);
     }
+    function rollback(message) {
+        var p = pending;
+        if (!p) return;
+        clearRestore();
+        var s = p.session;
+        if (!current(s)) return;
+        notify(message);
+        if (p.rollback) return;
+        s.audio = p.oldAudio;
+        s.data.url = p.oldURL;
+        s.tracks.forEach(function (t) { t.selected = t.enabled = t.index === s.audio; });
+        pending = {session: s, time: p.time, paused: p.paused, deadline: Date.now() + 60000, attempted: false, rollback: true};
+        try {
+            L.PlayerVideo.destroy(true);
+            L.PlayerVideo.url(p.oldURL, false);
+            restoreTimer = setInterval(restore, 500);
+        } catch (e) {
+            clearRestore();
+            notify('Не удалось вернуть прежний поток. Откройте фильм заново.');
+        }
+        paint(s);
+    }
     function restore() {
         var p = pending;
         if (!p || !current(p.session)) return clearRestore();
         if (Date.now() > p.deadline) {
-            clearRestore();
-            notify('Не удалось восстановить позицию после смены дорожки. Используйте перемотку.');
+            rollback(p.rollback ? 'Не удалось восстановить прежний поток. Откройте фильм заново.' : 'Новая дорожка не запустилась. Возвращаю прежний поток.');
             return;
         }
         var v = L.PlayerVideo.video();
         if (!v || !(v.duration > 0) || !isFinite(v.duration)) return;
+        // Reassigning currentTime while a seek is pending can restart that seek
+        // indefinitely in TV engines, preventing playback from ever resuming.
+        if (v.seeking || (typeof v.readyState === 'number' && v.readyState < 1)) return;
         var target = Math.min(p.time, Math.max(0, v.duration - 0.1));
         if (!p.attempted || Math.abs(v.currentTime - target) > 2) {
             try {
@@ -68,10 +92,10 @@
             } catch (e) { return; }
             return;
         }
-        if (v.seeking) return;
         var paused = p.paused;
         clearRestore();
         if (paused) L.PlayerVideo.pause();
+        else L.PlayerVideo.play();
         paint(p.session);
     }
     function choose(s, index) {
@@ -87,23 +111,19 @@
         var u = parse(s.hlsURL);
         if (!u) return;
         u.searchParams.set('audio', String(index));
-        pending = {session: s, time: v.currentTime, paused: !!v.paused, deadline: Date.now() + 60000, attempted: false};
+        pending = {session: s, time: v.currentTime, paused: !!v.paused, deadline: Date.now() + 60000, attempted: false, oldURL: oldURL, oldAudio: oldAudio};
         s.audio = index;
         s.data.url = u.href;
         s.tracks.forEach(function (t) { t.selected = t.enabled = t.index === index; });
-        // Keep Player/playlist/timeline alive. This is the same engine-level reload
-        // Lampa uses for changing quality, without another Player.play()/preroll.
+        // A new audio stream needs normal HLS initialization. Passing true here
+        // bypasses Lampa's manifest parser and loads the master directly on TVs.
+        s.data.hls_manifest_timeout = Math.max(60000, Number(s.data.hls_manifest_timeout) || 0);
         try {
             L.PlayerVideo.destroy(true);
-            L.PlayerVideo.url(s.data.url, true);
+            L.PlayerVideo.url(s.data.url, false);
             restoreTimer = setInterval(restore, 500);
         } catch (e) {
-            clearRestore();
-            s.audio = oldAudio;
-            s.data.url = oldURL;
-            s.tracks.forEach(function (t) { t.selected = t.enabled = t.index === oldAudio; });
-            try { L.PlayerVideo.destroy(true); L.PlayerVideo.url(oldURL, true); } catch (ignored) {}
-            notify('Не удалось открыть выбранную аудиодорожку.');
+            rollback('Не удалось открыть выбранную дорожку. Возвращаю прежний поток.');
         }
         paint(s);
     }
@@ -164,7 +184,7 @@
         if (!L || !window.appready) { retry = setTimeout(init, 500); return; }
         if (!L.Player || !L.Player.listener || !L.PlayerPanel || !L.PlayerPanel.setTracks ||
             !L.PlayerVideo || !L.PlayerVideo.listener || !L.PlayerVideo.video || !L.PlayerVideo.url ||
-            !L.PlayerVideo.destroy || !L.PlayerVideo.pause || !window.URL || !window.URLSearchParams) {
+            !L.PlayerVideo.destroy || !L.PlayerVideo.pause || !L.PlayerVideo.play || !window.URL || !window.URLSearchParams) {
             notify('Torrent Audio: эта версия Lampa или браузера не поддерживается.');
             return;
         }
@@ -179,11 +199,11 @@
         listen(L.PlayerVideo.listener, 'canplay', restore);
         listen(L.PlayerVideo.listener, 'loadeddata', restore);
         listen(L.PlayerVideo.listener, 'error', function () {
-            if (pending) { clearRestore(); notify('Ошибка HLS после смены дорожки. Попробуйте другую дорожку.'); }
+            if (pending) rollback(pending.rollback ? 'Ошибка прежнего потока. Откройте фильм заново.' : 'Ошибка новой дорожки. Возвращаю прежний поток.');
         });
     }
     window[KEY] = {
-        version: '0.1.0',
+        version: '0.1.2',
         setGateway: function (url) {
             var u = parse(url);
             if (!u || !/^https?:$/.test(u.protocol) || u.username || u.password || u.search || u.hash || u.pathname !== '/') {
