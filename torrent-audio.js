@@ -13,7 +13,7 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.5 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.1.6 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
     }
     function status() {
         var p = pending, v = null;
@@ -34,7 +34,7 @@
     }
     function timeoutDetails() {
         lastStatus = status();
-        return ' [TA 0.1.5 phase=' + lastStatus.phase +
+        return ' [TA 0.1.6 phase=' + lastStatus.phase +
             ' t=' + lastStatus.time + '/' + lastStatus.target +
             ' d=' + lastStatus.duration + ' ready=' + lastStatus.readyState +
             ' net=' + lastStatus.networkState + ' err=' + lastStatus.mediaError +
@@ -164,25 +164,25 @@
             }
             return;
         }
-        // Reassigning currentTime while a seek is pending can restart that seek
-        // indefinitely in TV engines, preventing playback from ever resuming.
-        if (v.seeking || (typeof v.readyState === 'number' && v.readyState < 1)) return;
         var target = Math.min(p.time, Math.max(0, v.duration - 0.1));
-        if (!p.attempted || Math.abs(v.currentTime - target) > 2) {
+        // Seek at most once, and skip the seek when already near the target.
+        // Do not wait for seeking=false before play(): some TV engines need
+        // playback to run before an outstanding seek can finish.
+        if (!p.attempted) {
             try {
-                v.currentTime = target;
+                if (Math.abs(v.currentTime - target) > 2) v.currentTime = target;
                 p.attempted = true;
             } catch (e) { return; }
-            return;
         }
         if (p.paused) {
+            if (Math.abs(v.currentTime - target) > 2) return;
             L.PlayerVideo.pause();
             clearRestore();
             paint(p.session);
         }
         else {
             p.resumeRequested = true;
-            p.resumeFrom = v.currentTime;
+            p.resumeFrom = target;
             L.PlayerVideo.play();
         }
     }
@@ -202,7 +202,7 @@
             paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
         pending = p;
         restoreTimer = setInterval(restore, 500);
-        notify('Torrent Audio 0.1.5: подготовка дорожки. Текущее видео пока не останавливается.');
+        notify('Torrent Audio 0.1.6: подготовка дорожки. Текущее видео пока не останавливается.');
         var xhr = new XMLHttpRequest();
         request = xhr;
         xhr.open('GET', u.href, true);
@@ -310,7 +310,7 @@
         });
     }
     window[KEY] = {
-        version: '0.1.5',
+        version: '0.1.6',
         getStatus: status,
         getLastStatus: function () { return lastStatus ? JSON.parse(JSON.stringify(lastStatus)) : null; },
         getLastError: function () {
