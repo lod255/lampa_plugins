@@ -3,7 +3,7 @@
     var KEY = 'LampaTorrentAudio';
     if (window[KEY] && window[KEY].destroy) window[KEY].destroy();
     var L, session, request, pending, initialized = false, dead = false;
-    var bindings = [], retry, restoreTimer, originalTracks, tracksWrapper, lastError = null;
+    var bindings = [], retry, restoreTimer, originalTracks, tracksWrapper, lastError = null, lastStatus = null;
     var gatewayDefault = 'http://192.168.1.2:8090';
 
     function notify(message) { if (L && L.Noty) L.Noty.show(message); }
@@ -13,7 +13,33 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.4 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.1.5 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+    }
+    function status() {
+        var p = pending, v = null;
+        try { v = L.PlayerVideo.video(); } catch (ignored) {}
+        var result = {
+            phase: p ? p.phase : 'idle',
+            target: p ? Math.round(p.time) : null,
+            time: v ? String(v.currentTime) : 'no-video',
+            duration: v ? String(v.duration) : 'no-video',
+            readyState: v && typeof v.readyState !== 'undefined' ? v.readyState : '?',
+            networkState: v && typeof v.networkState !== 'undefined' ? v.networkState : '?',
+            paused: v ? !!v.paused : null,
+            seeking: v ? !!v.seeking : null,
+            mediaError: v && v.error ? v.error.code : 0,
+            resumeRequested: !!(p && p.resumeRequested)
+        };
+        return result;
+    }
+    function timeoutDetails() {
+        lastStatus = status();
+        return ' [TA 0.1.5 phase=' + lastStatus.phase +
+            ' t=' + lastStatus.time + '/' + lastStatus.target +
+            ' d=' + lastStatus.duration + ' ready=' + lastStatus.readyState +
+            ' net=' + lastStatus.networkState + ' err=' + lastStatus.mediaError +
+            ' pause=' + Number(lastStatus.paused) + ' seek=' + Number(lastStatus.seeking) +
+            ' resume=' + Number(lastStatus.resumeRequested) + ']';
     }
     function listen(bus, event, callback) {
         bus.follow(event, callback);
@@ -122,7 +148,7 @@
         var p = pending;
         if (!p || dead) return clearRestore();
         if (Date.now() > p.deadline) {
-            rollback(p.rollback ? 'Не удалось восстановить прежний поток. Откройте фильм заново.' : 'Новая дорожка не запустилась. Возвращаю прежний поток.');
+            rollback((p.rollback ? 'Не удалось восстановить прежний поток. Откройте фильм заново.' : 'Новая дорожка не запустилась. Возвращаю прежний поток.') + timeoutDetails());
             return;
         }
         if (p.phase !== 'restore' || !current(p.session)) return;
@@ -176,7 +202,7 @@
             paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
         pending = p;
         restoreTimer = setInterval(restore, 500);
-        notify('Torrent Audio 0.1.4: подготовка дорожки. Текущее видео пока не останавливается.');
+        notify('Torrent Audio 0.1.5: подготовка дорожки. Текущее видео пока не останавливается.');
         var xhr = new XMLHttpRequest();
         request = xhr;
         xhr.open('GET', u.href, true);
@@ -284,7 +310,9 @@
         });
     }
     window[KEY] = {
-        version: '0.1.4',
+        version: '0.1.5',
+        getStatus: status,
+        getLastStatus: function () { return lastStatus ? JSON.parse(JSON.stringify(lastStatus)) : null; },
         getLastError: function () {
             return lastError ? {stage: lastError.stage, name: lastError.name, message: lastError.message} : null;
         },
