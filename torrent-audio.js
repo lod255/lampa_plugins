@@ -13,7 +13,7 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.8 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.1.9 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
     }
     function status() {
         var p = pending, v = null;
@@ -31,20 +31,23 @@
             resumeRequested: !!(p && p.resumeRequested),
             playAttempts: p ? p.playAttempts || 0 : 0,
             playResult: p ? p.playResult || 'none' : 'none',
-            hlsMode: p ? p.hlsMode || 'auto' : session ? session.hlsMode || 'auto' : 'auto'
+            hlsMode: p ? p.hlsMode || 'auto' : session ? session.hlsMode || 'auto' : 'auto',
+            streamError: p ? p.streamError || '' : '',
+            streamFatal: p && typeof p.streamFatal === 'boolean' ? p.streamFatal : null
         };
         return result;
     }
     function timeoutDetails() {
         lastStatus = status();
-        return ' [TA 0.1.8 phase=' + lastStatus.phase +
+        return ' [TA 0.1.9 phase=' + lastStatus.phase +
             ' t=' + lastStatus.time + '/' + lastStatus.target +
             ' d=' + lastStatus.duration + ' ready=' + lastStatus.readyState +
             ' net=' + lastStatus.networkState + ' err=' + lastStatus.mediaError +
             ' pause=' + Number(lastStatus.paused) + ' seek=' + Number(lastStatus.seeking) +
             ' resume=' + Number(lastStatus.resumeRequested) +
             ' plays=' + lastStatus.playAttempts + ' play=' + lastStatus.playResult +
-            ' hls=' + lastStatus.hlsMode + ']';
+            ' hls=' + lastStatus.hlsMode +
+            (lastStatus.streamError ? ' fatal=' + lastStatus.streamFatal + ' cause=' + lastStatus.streamError.slice(0, 180) : '') + ']';
     }
     function listen(bus, event, callback) {
         bus.follow(event, callback);
@@ -123,19 +126,19 @@
         // hls.js needs an HTML video element, not Lampa's native AVPlay object.
         var v = L.PlayerVideo.video();
         if (!v || String(v.tagName).toLowerCase() !== 'video') {
-            notify('Torrent Audio 0.1.8: hls.js требует HTML-видеоплеер. Сохраняю обычный запуск.');
+            notify('Torrent Audio 0.1.9: hls.js требует HTML-видеоплеер. Сохраняю обычный запуск.');
             return 'auto-nonvideo';
         }
         var supported = false;
         try { supported = !!(window.Hls && typeof window.Hls.isSupported === 'function' && window.Hls.isSupported()); }
         catch (error) { failure('hls.support', error); }
         if (!supported) {
-            notify('Torrent Audio 0.1.8: hls.js недоступен или не поддерживается. Сохраняю обычный запуск.');
+            notify('Torrent Audio 0.1.9: hls.js недоступен или не поддерживается. Сохраняю обычный запуск.');
             return 'auto-unsupported';
         }
         // Per-playback Lampa option: do not change global player/HLS settings.
         data.hls_type = 'hlsjs';
-        notify('Torrent Audio 0.1.8: пробую выбранную дорожку через hls.js.');
+        notify('Torrent Audio 0.1.9: пробую выбранную дорожку через hls.js.');
         return 'js-requested';
     }
     function restart(p, data) {
@@ -148,6 +151,8 @@
         p.resumeFrom = 0;
         p.playAttempts = 0;
         p.playResult = 'none';
+        p.streamError = '';
+        p.streamFatal = null;
         p.lastPlayAt = 0;
         p.progressAt = 0;
         p.progressPosition = 0;
@@ -273,7 +278,7 @@
             paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
         pending = p;
         restoreTimer = setInterval(restore, 500);
-        notify('Torrent Audio 0.1.8: подготовка дорожки. Текущее видео пока не останавливается.');
+        notify('Torrent Audio 0.1.9: подготовка дорожки. Текущее видео пока не останавливается.');
         var xhr = new XMLHttpRequest();
         request = xhr;
         xhr.open('GET', u.href, true);
@@ -381,12 +386,29 @@
         listen(L.Player.listener, 'close', function () { reset(); });
         listen(L.PlayerVideo.listener, 'canplay', restore);
         listen(L.PlayerVideo.listener, 'loadeddata', restore);
-        listen(L.PlayerVideo.listener, 'error', function () {
-            if (pending && pending.phase === 'restore') rollback(pending.rollback ? 'Ошибка прежнего потока. Откройте фильм заново.' : 'Ошибка новой дорожки. Возвращаю прежний поток.');
+        listen(L.PlayerVideo.listener, 'error', function (event) {
+            var p = pending;
+            if (!p || p.phase !== 'restore') return;
+            var v = L.PlayerVideo.video();
+            var mediaError = v && v.error;
+            var reason = event && event.error || mediaError;
+            if (reason && typeof reason === 'object') {
+                reason = {name: reason.name || 'MediaError',
+                    message: (typeof reason.code !== 'undefined' ? 'code=' + reason.code + ' ' : '') +
+                        (reason.message || reason.details || 'Без описания')};
+            }
+            failure('stream', reason || 'Плеер не передал причину ошибки');
+            p.streamError = lastError.message;
+            p.streamFatal = !(event && event.fatal === false && !(mediaError && mediaError.code));
+            // hls.js also reports recoverable warnings through Lampa's error bus.
+            // Allow its recovery to run; the existing deadline still bounds waiting.
+            if (!p.streamFatal) return;
+            rollback((p.rollback ? 'Ошибка прежнего потока. Откройте фильм заново.' :
+                'Ошибка новой дорожки. Возвращаю прежний поток.') + timeoutDetails());
         });
     }
     window[KEY] = {
-        version: '0.1.8',
+        version: '0.1.9',
         getStatus: status,
         getLastStatus: function () { return lastStatus ? JSON.parse(JSON.stringify(lastStatus)) : null; },
         getLastError: function () {
