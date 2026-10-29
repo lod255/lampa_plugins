@@ -3,10 +3,18 @@
     var KEY = 'LampaTorrentAudio';
     if (window[KEY] && window[KEY].destroy) window[KEY].destroy();
     var L, session, request, pending, initialized = false, dead = false;
-    var bindings = [], retry, restoreTimer, originalTracks, tracksWrapper;
+    var bindings = [], retry, restoreTimer, originalTracks, tracksWrapper, lastError = null;
     var gatewayDefault = 'http://192.168.1.2:8090';
 
     function notify(message) { if (L && L.Noty) L.Noty.show(message); }
+    function failure(stage, error) {
+        lastError = {
+            stage: stage,
+            name: error && error.name ? String(error.name) : 'Error',
+            message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
+        };
+        return 'Torrent Audio 0.1.3 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+    }
     function listen(bus, event, callback) {
         bus.follow(event, callback);
         bindings.push([bus, event, callback]);
@@ -62,13 +70,15 @@
         s.data.url = p.oldURL;
         s.tracks.forEach(function (t) { t.selected = t.enabled = t.index === s.audio; });
         pending = {session: s, time: p.time, paused: p.paused, deadline: Date.now() + 60000, attempted: false, rollback: true};
+        var stage = 'rollback.destroy';
         try {
             L.PlayerVideo.destroy(true);
+            stage = 'rollback.url';
             L.PlayerVideo.url(p.oldURL, false);
             restoreTimer = setInterval(restore, 500);
         } catch (e) {
             clearRestore();
-            notify('Не удалось вернуть прежний поток. Откройте фильм заново.');
+            notify(failure(stage, e) + '. Откройте фильм заново.');
         }
         paint(s);
     }
@@ -118,12 +128,14 @@
         // A new audio stream needs normal HLS initialization. Passing true here
         // bypasses Lampa's manifest parser and loads the master directly on TVs.
         s.data.hls_manifest_timeout = Math.max(60000, Number(s.data.hls_manifest_timeout) || 0);
+        var stage = 'switch.destroy';
         try {
             L.PlayerVideo.destroy(true);
+            stage = 'switch.url';
             L.PlayerVideo.url(s.data.url, false);
             restoreTimer = setInterval(restore, 500);
         } catch (e) {
-            rollback('Не удалось открыть выбранную дорожку. Возвращаю прежний поток.');
+            rollback(failure(stage, e) + '. Возвращаю прежний поток.');
         }
         paint(s);
     }
@@ -203,7 +215,10 @@
         });
     }
     window[KEY] = {
-        version: '0.1.2',
+        version: '0.1.3',
+        getLastError: function () {
+            return lastError ? {stage: lastError.stage, name: lastError.name, message: lastError.message} : null;
+        },
         setGateway: function (url) {
             var u = parse(url);
             if (!u || !/^https?:$/.test(u.protocol) || u.username || u.password || u.search || u.hash || u.pathname !== '/') {
