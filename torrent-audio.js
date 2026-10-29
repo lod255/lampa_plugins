@@ -13,7 +13,7 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.6 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.1.7 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
     }
     function status() {
         var p = pending, v = null;
@@ -28,18 +28,21 @@
             paused: v ? !!v.paused : null,
             seeking: v ? !!v.seeking : null,
             mediaError: v && v.error ? v.error.code : 0,
-            resumeRequested: !!(p && p.resumeRequested)
+            resumeRequested: !!(p && p.resumeRequested),
+            playAttempts: p ? p.playAttempts || 0 : 0,
+            playResult: p ? p.playResult || 'none' : 'none'
         };
         return result;
     }
     function timeoutDetails() {
         lastStatus = status();
-        return ' [TA 0.1.6 phase=' + lastStatus.phase +
+        return ' [TA 0.1.7 phase=' + lastStatus.phase +
             ' t=' + lastStatus.time + '/' + lastStatus.target +
             ' d=' + lastStatus.duration + ' ready=' + lastStatus.readyState +
             ' net=' + lastStatus.networkState + ' err=' + lastStatus.mediaError +
             ' pause=' + Number(lastStatus.paused) + ' seek=' + Number(lastStatus.seeking) +
-            ' resume=' + Number(lastStatus.resumeRequested) + ']';
+            ' resume=' + Number(lastStatus.resumeRequested) +
+            ' plays=' + lastStatus.playAttempts + ' play=' + lastStatus.playResult + ']';
     }
     function listen(bus, event, callback) {
         bus.follow(event, callback);
@@ -117,6 +120,11 @@
         p.attempted = false;
         p.resumeRequested = false;
         p.resumeFrom = 0;
+        p.playAttempts = 0;
+        p.playResult = 'none';
+        p.lastPlayAt = 0;
+        p.progressAt = 0;
+        p.progressPosition = 0;
         p.deadline = Date.now() + 60000;
         // Arm before sending: Lampa synchronously emits destroy/start here.
         if (!restoreTimer) restoreTimer = setInterval(restore, 500);
@@ -144,6 +152,30 @@
             notify(failure('rollback.restart', e) + '. Откройте фильм заново.');
         }
     }
+    function requestResume(p) {
+        // Arm before play(): media events may synchronously call restore().
+        p.playAttempts++;
+        p.lastPlayAt = Date.now();
+        p.playResult = 'calling';
+        try {
+            var result = L.PlayerVideo.play();
+            p.playResult = 'returned';
+            // Some Lampa versions return nothing; returned is not proof of playback.
+            if (result && typeof result.then === 'function') {
+                var attempt = p.playAttempts;
+                result.then(function () {
+                    if (pending === p && p.playAttempts === attempt) p.playResult = 'resolved';
+                }, function (error) {
+                    if (pending !== p || p.playAttempts !== attempt) return;
+                    p.playResult = 'rejected';
+                    failure('restore.play', error);
+                });
+            }
+        } catch (error) {
+            p.playResult = 'threw';
+            failure('restore.play', error);
+        }
+    }
     function restore() {
         var p = pending;
         if (!p || dead) return clearRestore();
@@ -161,6 +193,17 @@
             if (v.currentTime > p.resumeFrom + 0.2) {
                 clearRestore();
                 paint(p.session);
+                return;
+            }
+            var now = Date.now();
+            if (v.currentTime > p.progressPosition + 0.2) {
+                p.progressPosition = v.currentTime;
+                p.progressAt = now;
+            }
+            // Initial call plus at most three retries, only while time is stalled.
+            // Do not seek again or extend the existing rollback deadline.
+            if (p.playAttempts < 4 && now - p.lastPlayAt >= 3000 && now - p.progressAt >= 3000) {
+                requestResume(p);
             }
             return;
         }
@@ -183,7 +226,9 @@
         else {
             p.resumeRequested = true;
             p.resumeFrom = target;
-            L.PlayerVideo.play();
+            p.progressPosition = v.currentTime;
+            p.progressAt = Date.now();
+            requestResume(p);
         }
     }
     function choose(s, index) {
@@ -202,7 +247,7 @@
             paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
         pending = p;
         restoreTimer = setInterval(restore, 500);
-        notify('Torrent Audio 0.1.6: подготовка дорожки. Текущее видео пока не останавливается.');
+        notify('Torrent Audio 0.1.7: подготовка дорожки. Текущее видео пока не останавливается.');
         var xhr = new XMLHttpRequest();
         request = xhr;
         xhr.open('GET', u.href, true);
@@ -310,7 +355,7 @@
         });
     }
     window[KEY] = {
-        version: '0.1.6',
+        version: '0.1.7',
         getStatus: status,
         getLastStatus: function () { return lastStatus ? JSON.parse(JSON.stringify(lastStatus)) : null; },
         getLastError: function () {
