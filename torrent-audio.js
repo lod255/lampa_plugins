@@ -84,7 +84,7 @@
         var v = L.PlayerVideo.video();
         if (!v || !isFinite(v.currentTime)) return notify('Подождите начала воспроизведения.');
         var oldURL = s.data.url, oldAudio = s.audio;
-        var u = parse(oldURL);
+        var u = parse(s.hlsURL);
         if (!u) return;
         u.searchParams.set('audio', String(index));
         pending = {session: s, time: v.currentTime, paused: !!v.paused, deadline: Date.now() + 60000, attempted: false};
@@ -109,7 +109,7 @@
     }
     function loadTracks(s) {
         if (request) request.abort();
-        var u = parse(s.data.url);
+        var u = parse(s.hlsURL);
         u.pathname = u.pathname.replace(/master\.m3u8$/, 'probe');
         u.searchParams.delete('audio');
         var xhr = new XMLHttpRequest();
@@ -151,8 +151,10 @@
         if (!data || data.iptv || typeof data.url !== 'string') return;
         var u = media(data.url);
         if (!u) return;
-        data.url = u.href;
-        var s = {data: data, audio: Number(u.searchParams.get('audio') || 0), tracks: []};
+        // Do not force audio=0 or replace a working direct stream on startup.
+        // The HLS gateway is activated only by an explicit track selection.
+        var direct = /\/stream(?:\/|\?)/.test(data.url);
+        var s = {data: data, hlsURL: u.href, audio: direct ? null : Number(u.searchParams.get('audio') || 0), tracks: []};
         session = s;
         loadTracks(s);
     }
