@@ -13,7 +13,7 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.7 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.1.8 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
     }
     function status() {
         var p = pending, v = null;
@@ -30,19 +30,21 @@
             mediaError: v && v.error ? v.error.code : 0,
             resumeRequested: !!(p && p.resumeRequested),
             playAttempts: p ? p.playAttempts || 0 : 0,
-            playResult: p ? p.playResult || 'none' : 'none'
+            playResult: p ? p.playResult || 'none' : 'none',
+            hlsMode: p ? p.hlsMode || 'auto' : session ? session.hlsMode || 'auto' : 'auto'
         };
         return result;
     }
     function timeoutDetails() {
         lastStatus = status();
-        return ' [TA 0.1.7 phase=' + lastStatus.phase +
+        return ' [TA 0.1.8 phase=' + lastStatus.phase +
             ' t=' + lastStatus.time + '/' + lastStatus.target +
             ' d=' + lastStatus.duration + ' ready=' + lastStatus.readyState +
             ' net=' + lastStatus.networkState + ' err=' + lastStatus.mediaError +
             ' pause=' + Number(lastStatus.paused) + ' seek=' + Number(lastStatus.seeking) +
             ' resume=' + Number(lastStatus.resumeRequested) +
-            ' plays=' + lastStatus.playAttempts + ' play=' + lastStatus.playResult + ']';
+            ' plays=' + lastStatus.playAttempts + ' play=' + lastStatus.playResult +
+            ' hls=' + lastStatus.hlsMode + ']';
     }
     function listen(bus, event, callback) {
         bus.follow(event, callback);
@@ -113,10 +115,34 @@
         }
         return data;
     }
+    function selectHlsEngine(data) {
+        var samsung = /tizen|samsung/i.test(String(window.navigator && window.navigator.userAgent || ''));
+        try { samsung = samsung || !!(L.Platform && L.Platform.is && L.Platform.is('tizen')); }
+        catch (ignored) {}
+        if (!samsung) return 'auto';
+        // hls.js needs an HTML video element, not Lampa's native AVPlay object.
+        var v = L.PlayerVideo.video();
+        if (!v || String(v.tagName).toLowerCase() !== 'video') {
+            notify('Torrent Audio 0.1.8: hls.js требует HTML-видеоплеер. Сохраняю обычный запуск.');
+            return 'auto-nonvideo';
+        }
+        var supported = false;
+        try { supported = !!(window.Hls && typeof window.Hls.isSupported === 'function' && window.Hls.isSupported()); }
+        catch (error) { failure('hls.support', error); }
+        if (!supported) {
+            notify('Torrent Audio 0.1.8: hls.js недоступен или не поддерживается. Сохраняю обычный запуск.');
+            return 'auto-unsupported';
+        }
+        // Per-playback Lampa option: do not change global player/HLS settings.
+        data.hls_type = 'hlsjs';
+        notify('Torrent Audio 0.1.8: пробую выбранную дорожку через hls.js.');
+        return 'js-requested';
+    }
     function restart(p, data) {
         p.expected = data;
         p.restarting = true;
         p.phase = 'restart';
+        if (p.rollback) p.hlsMode = 'rollback';
         p.attempted = false;
         p.resumeRequested = false;
         p.resumeFrom = 0;
@@ -247,7 +273,7 @@
             paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
         pending = p;
         restoreTimer = setInterval(restore, 500);
-        notify('Torrent Audio 0.1.7: подготовка дорожки. Текущее видео пока не останавливается.');
+        notify('Torrent Audio 0.1.8: подготовка дорожки. Текущее видео пока не останавливается.');
         var xhr = new XMLHttpRequest();
         request = xhr;
         xhr.open('GET', u.href, true);
@@ -261,7 +287,11 @@
             // Capture the current position now, not before the HLS preparation.
             var video = L.PlayerVideo.video();
             if (video && isFinite(video.currentTime)) { p.time = video.currentTime; p.paused = !!video.paused; }
-            try { restart(p, playbackData(s.data, u.href)); }
+            try {
+                var nextData = playbackData(s.data, u.href);
+                p.hlsMode = selectHlsEngine(nextData);
+                restart(p, nextData);
+            }
             catch (e) { rollback(failure('switch.restart', e) + '. Возвращаю прежний поток.'); }
         };
         xhr.onerror = xhr.ontimeout = function () {
@@ -319,6 +349,7 @@
         // The HLS gateway is activated only by an explicit track selection.
         var direct = /\/stream(?:\/|\?)/.test(data.url);
         var s = {data: data, hlsURL: u.href, audio: direct ? null : Number(u.searchParams.get('audio') || 0), tracks: []};
+        s.hlsMode = transition ? transition.hlsMode : 'auto';
         session = s;
         if (transition) {
             transition.session = s;
@@ -355,7 +386,7 @@
         });
     }
     window[KEY] = {
-        version: '0.1.7',
+        version: '0.1.8',
         getStatus: status,
         getLastStatus: function () { return lastStatus ? JSON.parse(JSON.stringify(lastStatus)) : null; },
         getLastError: function () {
