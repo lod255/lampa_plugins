@@ -13,7 +13,7 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.9 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.1.10 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
     }
     function status() {
         var p = pending, v = null;
@@ -39,7 +39,7 @@
     }
     function timeoutDetails() {
         lastStatus = status();
-        return ' [TA 0.1.9 phase=' + lastStatus.phase +
+        return ' [TA 0.1.10 phase=' + lastStatus.phase +
             ' t=' + lastStatus.time + '/' + lastStatus.target +
             ' d=' + lastStatus.duration + ' ready=' + lastStatus.readyState +
             ' net=' + lastStatus.networkState + ' err=' + lastStatus.mediaError +
@@ -126,19 +126,18 @@
         // hls.js needs an HTML video element, not Lampa's native AVPlay object.
         var v = L.PlayerVideo.video();
         if (!v || String(v.tagName).toLowerCase() !== 'video') {
-            notify('Torrent Audio 0.1.9: hls.js требует HTML-видеоплеер. Сохраняю обычный запуск.');
+            notify('Torrent Audio 0.1.10: hls.js требует HTML-видеоплеер. Сохраняю обычный запуск.');
             return 'auto-nonvideo';
         }
         var supported = false;
         try { supported = !!(window.Hls && typeof window.Hls.isSupported === 'function' && window.Hls.isSupported()); }
         catch (error) { failure('hls.support', error); }
         if (!supported) {
-            notify('Torrent Audio 0.1.9: hls.js недоступен или не поддерживается. Сохраняю обычный запуск.');
+            notify('Torrent Audio 0.1.10: hls.js недоступен или не поддерживается. Сохраняю обычный запуск.');
             return 'auto-unsupported';
         }
         // Per-playback Lampa option: do not change global player/HLS settings.
         data.hls_type = 'hlsjs';
-        notify('Torrent Audio 0.1.9: пробую выбранную дорожку через hls.js.');
         return 'js-requested';
     }
     function restart(p, data) {
@@ -278,7 +277,6 @@
             paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
         pending = p;
         restoreTimer = setInterval(restore, 500);
-        notify('Torrent Audio 0.1.9: подготовка дорожки. Текущее видео пока не останавливается.');
         var xhr = new XMLHttpRequest();
         request = xhr;
         xhr.open('GET', u.href, true);
@@ -408,7 +406,7 @@
         });
     }
     window[KEY] = {
-        version: '0.1.9',
+        version: '0.1.10',
         getStatus: status,
         getLastStatus: function () { return lastStatus ? JSON.parse(JSON.stringify(lastStatus)) : null; },
         getLastError: function () {
