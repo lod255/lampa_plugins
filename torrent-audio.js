@@ -13,7 +13,7 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.3 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.1.4 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
     }
     function listen(bus, event, callback) {
         bus.follow(event, callback);
@@ -44,10 +44,10 @@
         restoreTimer = null;
         pending = null;
     }
-    function reset() {
+    function reset(preserveTransition) {
         session = null;
         if (request) { request.abort(); request = null; }
-        clearRestore();
+        if (!preserveTransition) clearRestore();
     }
     function current(s) { return !dead && session === s; }
     function paint(s) {
@@ -58,39 +58,86 @@
         s.data.translate.tracks = s.tracks;
         originalTracks.call(L.PlayerPanel, s.tracks);
     }
+    function playbackData(source, url) {
+        var data = {};
+        Object.keys(source).forEach(function (key) { data[key] = source[key]; });
+        data.url = url;
+        data.launch_player = 'inner';
+        data.continue_play = true;
+        data.hls_manifest_timeout = Math.max(60000, Number(source.hls_manifest_timeout) || 0);
+        delete data.quality;
+        delete data.url_reserve;
+        delete data.voiceovers;
+        if (source.translate) {
+            data.translate = {};
+            Object.keys(source.translate).forEach(function (key) {
+                if (key !== 'tracks') data.translate[key] = source.translate[key];
+            });
+        }
+        if (source.timeline) {
+            data.timeline = {};
+            Object.keys(source.timeline).forEach(function (key) { data.timeline[key] = source.timeline[key]; });
+            // Restore ourselves after metadata; do not show the resume dialog.
+            data.timeline.time = 0;
+            data.timeline.percent = 0;
+            data.timeline.waiting_for_user = false;
+        }
+        return data;
+    }
+    function restart(p, data) {
+        p.expected = data;
+        p.restarting = true;
+        p.phase = 'restart';
+        p.attempted = false;
+        p.resumeRequested = false;
+        p.resumeFrom = 0;
+        p.deadline = Date.now() + 60000;
+        // Arm before sending: Lampa synchronously emits destroy/start here.
+        if (!restoreTimer) restoreTimer = setInterval(restore, 500);
+        var list = L.PlayerPlaylist.get().slice();
+        var oldURL = p.session.data.url;
+        list = list.map(function (item) { return item.url === oldURL ? data : item; });
+        // Lampa's own series-change handler destroys Player, invokes play(),
+        // preserves the back callback, and restores the playlist and video params.
+        L.PlayerPlaylist.listener.send('select', {item: data, playlist: list});
+        if (!dead && pending === p) L.PlayerPlaylist.set(list);
+    }
     function rollback(message) {
         var p = pending;
         if (!p) return;
-        clearRestore();
-        var s = p.session;
-        if (!current(s)) return;
         notify(message);
-        if (p.rollback) return;
-        s.audio = p.oldAudio;
-        s.data.url = p.oldURL;
-        s.tracks.forEach(function (t) { t.selected = t.enabled = t.index === s.audio; });
-        pending = {session: s, time: p.time, paused: p.paused, deadline: Date.now() + 60000, attempted: false, rollback: true};
-        var stage = 'rollback.destroy';
-        try {
-            L.PlayerVideo.destroy(true);
-            stage = 'rollback.url';
-            L.PlayerVideo.url(p.oldURL, false);
-            restoreTimer = setInterval(restore, 500);
-        } catch (e) {
+        if (p.rollback || p.phase === 'prepare') {
             clearRestore();
-            notify(failure(stage, e) + '. Откройте фильм заново.');
+            if (request) { request.abort(); request = null; }
+            return;
         }
-        paint(s);
+        p.rollback = true;
+        try { restart(p, playbackData(p.previousData, p.oldURL)); }
+        catch (e) {
+            clearRestore();
+            notify(failure('rollback.restart', e) + '. Откройте фильм заново.');
+        }
     }
     function restore() {
         var p = pending;
-        if (!p || !current(p.session)) return clearRestore();
+        if (!p || dead) return clearRestore();
         if (Date.now() > p.deadline) {
             rollback(p.rollback ? 'Не удалось восстановить прежний поток. Откройте фильм заново.' : 'Новая дорожка не запустилась. Возвращаю прежний поток.');
             return;
         }
+        if (p.phase !== 'restore' || !current(p.session)) return;
         var v = L.PlayerVideo.video();
         if (!v || !(v.duration > 0) || !isFinite(v.duration)) return;
+        if (typeof v.readyState === 'number' && v.readyState < 2) return;
+        // An accepted currentTime assignment alone does not prove playback.
+        // Keep the watchdog until the new stream actually advances.
+        if (p.resumeRequested) {
+            if (v.currentTime > p.resumeFrom + 0.2) {
+                clearRestore();
+                paint(p.session);
+            }
+            return;
+        }
         // Reassigning currentTime while a seek is pending can restart that seek
         // indefinitely in TV engines, preventing playback from ever resuming.
         if (v.seeking || (typeof v.readyState === 'number' && v.readyState < 1)) return;
@@ -102,11 +149,16 @@
             } catch (e) { return; }
             return;
         }
-        var paused = p.paused;
-        clearRestore();
-        if (paused) L.PlayerVideo.pause();
-        else L.PlayerVideo.play();
-        paint(p.session);
+        if (p.paused) {
+            L.PlayerVideo.pause();
+            clearRestore();
+            paint(p.session);
+        }
+        else {
+            p.resumeRequested = true;
+            p.resumeFrom = v.currentTime;
+            L.PlayerVideo.play();
+        }
     }
     function choose(s, index) {
         if (!current(s)) return;
@@ -117,27 +169,35 @@
         }
         var v = L.PlayerVideo.video();
         if (!v || !isFinite(v.currentTime)) return notify('Подождите начала воспроизведения.');
-        var oldURL = s.data.url, oldAudio = s.audio;
         var u = parse(s.hlsURL);
         if (!u) return;
         u.searchParams.set('audio', String(index));
-        pending = {session: s, time: v.currentTime, paused: !!v.paused, deadline: Date.now() + 60000, attempted: false, oldURL: oldURL, oldAudio: oldAudio};
-        s.audio = index;
-        s.data.url = u.href;
-        s.tracks.forEach(function (t) { t.selected = t.enabled = t.index === index; });
-        // A new audio stream needs normal HLS initialization. Passing true here
-        // bypasses Lampa's manifest parser and loads the master directly on TVs.
-        s.data.hls_manifest_timeout = Math.max(60000, Number(s.data.hls_manifest_timeout) || 0);
-        var stage = 'switch.destroy';
-        try {
-            L.PlayerVideo.destroy(true);
-            stage = 'switch.url';
-            L.PlayerVideo.url(s.data.url, false);
-            restoreTimer = setInterval(restore, 500);
-        } catch (e) {
-            rollback(failure(stage, e) + '. Возвращаю прежний поток.');
-        }
-        paint(s);
+        var p = {session: s, previousData: s.data, oldURL: s.data.url, time: v.currentTime,
+            paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
+        pending = p;
+        restoreTimer = setInterval(restore, 500);
+        notify('Torrent Audio 0.1.4: подготовка дорожки. Текущее видео пока не останавливается.');
+        var xhr = new XMLHttpRequest();
+        request = xhr;
+        xhr.open('GET', u.href, true);
+        xhr.timeout = 60000;
+        xhr.onload = function () {
+            if (dead || pending !== p || !current(s) || request !== xhr) return;
+            request = null;
+            if (xhr.status < 200 || xhr.status >= 300 || !/^\s*#EXTM3U/.test(xhr.responseText)) {
+                return rollback('HLS не готов (HTTP ' + xhr.status + '). Прежнее видео сохранено.');
+            }
+            // Capture the current position now, not before the HLS preparation.
+            var video = L.PlayerVideo.video();
+            if (video && isFinite(video.currentTime)) { p.time = video.currentTime; p.paused = !!video.paused; }
+            try { restart(p, playbackData(s.data, u.href)); }
+            catch (e) { rollback(failure('switch.restart', e) + '. Возвращаю прежний поток.'); }
+        };
+        xhr.onerror = xhr.ontimeout = function () {
+            if (pending === p && request === xhr) rollback('HLS недоступен: сеть, CORS или таймаут. Прежнее видео сохранено.');
+        };
+        try { xhr.send(); }
+        catch (e) { rollback(failure('switch.prepare', e)); }
     }
     function loadTracks(s) {
         if (request) request.abort();
@@ -179,7 +239,8 @@
         xhr.send();
     }
     function start(data) {
-        reset();
+        var transition = pending && pending.expected === data ? pending : null;
+        reset(!!transition);
         if (!data || data.iptv || typeof data.url !== 'string') return;
         var u = media(data.url);
         if (!u) return;
@@ -188,13 +249,20 @@
         var direct = /\/stream(?:\/|\?)/.test(data.url);
         var s = {data: data, hlsURL: u.href, audio: direct ? null : Number(u.searchParams.get('audio') || 0), tracks: []};
         session = s;
+        if (transition) {
+            transition.session = s;
+            transition.restarting = false;
+            transition.phase = 'restore';
+            transition.deadline = Date.now() + 60000;
+        }
         loadTracks(s);
     }
     function init() {
         if (dead) return;
         L = window.Lampa;
         if (!L || !window.appready) { retry = setTimeout(init, 500); return; }
-        if (!L.Player || !L.Player.listener || !L.PlayerPanel || !L.PlayerPanel.setTracks ||
+        if (!L.PlayerPlaylist || !L.PlayerPlaylist.get || !L.PlayerPlaylist.set || !L.PlayerPlaylist.listener || !L.PlayerPlaylist.listener.send ||
+            !L.Player || !L.Player.listener || !L.PlayerPanel || !L.PlayerPanel.setTracks ||
             !L.PlayerVideo || !L.PlayerVideo.listener || !L.PlayerVideo.video || !L.PlayerVideo.url ||
             !L.PlayerVideo.destroy || !L.PlayerVideo.pause || !L.PlayerVideo.play || !window.URL || !window.URLSearchParams) {
             notify('Torrent Audio: эта версия Lampa или браузера не поддерживается.');
@@ -207,15 +275,16 @@
         };
         L.PlayerPanel.setTracks = tracksWrapper;
         listen(L.Player.listener, 'start', start);
-        listen(L.Player.listener, 'destroy', reset);
+        listen(L.Player.listener, 'destroy', function () { reset(!!(pending && pending.restarting)); });
+        listen(L.Player.listener, 'close', function () { reset(); });
         listen(L.PlayerVideo.listener, 'canplay', restore);
         listen(L.PlayerVideo.listener, 'loadeddata', restore);
         listen(L.PlayerVideo.listener, 'error', function () {
-            if (pending) rollback(pending.rollback ? 'Ошибка прежнего потока. Откройте фильм заново.' : 'Ошибка новой дорожки. Возвращаю прежний поток.');
+            if (pending && pending.phase === 'restore') rollback(pending.rollback ? 'Ошибка прежнего потока. Откройте фильм заново.' : 'Ошибка новой дорожки. Возвращаю прежний поток.');
         });
     }
     window[KEY] = {
-        version: '0.1.3',
+        version: '0.1.4',
         getLastError: function () {
             return lastError ? {stage: lastError.stage, name: lastError.name, message: lastError.message} : null;
         },
@@ -227,7 +296,7 @@
             if (!initialized) throw new Error('Lampa ещё не готова');
             L.Storage.set('torrent_audio_gateway', u.origin);
         },
-        refresh: function () { if (session) loadTracks(session); },
+        refresh: function () { if (session && !pending) loadTracks(session); },
         destroy: function () {
             dead = true;
             clearTimeout(retry);
