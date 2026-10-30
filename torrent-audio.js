@@ -5,6 +5,8 @@
     var L, session, request, pending, initialized = false, dead = false;
     var bindings = [], retry, restoreTimer, originalTracks, tracksWrapper, lastError = null, lastStatus = null;
     var gatewayDefault = 'http://192.168.1.2:8090';
+    var opening = null, settingsAdded = false;
+    var settingsComponent = 'torrent_audio', preferDubKey = 'torrent_audio_prefer_russian_dub';
 
     function notify(message) { if (L && L.Noty) L.Noty.show(message); }
     function failure(stage, error) {
@@ -13,13 +15,13 @@
             name: error && error.name ? String(error.name) : 'Error',
             message: String(error && error.message || error || 'Без описания').replace(/https?:\/\/[^\s"'<>]+/g, '[URL]').slice(0, 400)
         };
-        return 'Torrent Audio 0.1.10 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
+        return 'Torrent Audio 0.2.0 [' + stage + ']: ' + lastError.name + ': ' + lastError.message;
     }
     function status() {
         var p = pending, v = null;
         try { v = L.PlayerVideo.video(); } catch (ignored) {}
         var result = {
-            phase: p ? p.phase : 'idle',
+            phase: p ? p.phase : opening ? opening.phase : 'idle',
             target: p ? Math.round(p.time) : null,
             time: v ? String(v.currentTime) : 'no-video',
             duration: v ? String(v.duration) : 'no-video',
@@ -39,7 +41,7 @@
     }
     function timeoutDetails() {
         lastStatus = status();
-        return ' [TA 0.1.10 phase=' + lastStatus.phase +
+        return ' [TA 0.2.0 phase=' + lastStatus.phase +
             ' t=' + lastStatus.time + '/' + lastStatus.target +
             ' d=' + lastStatus.duration + ' ready=' + lastStatus.readyState +
             ' net=' + lastStatus.networkState + ' err=' + lastStatus.mediaError +
@@ -83,6 +85,45 @@
         if (request) { request.abort(); request = null; }
         if (!preserveTransition) clearRestore();
     }
+    function cancelOpening() {
+        var o = opening;
+        opening = null;
+        if (!o) return;
+        clearTimeout(o.timer);
+        if (o.request) o.request.abort();
+    }
+    function preferDub() {
+        var value = L.Storage.get(preferDubKey, true);
+        return value === true || value === 'true' || value === 1 || value === '1';
+    }
+    function audioTracks(json) {
+        if (!json || !Array.isArray(json.Tracks)) throw new Error('Tracks');
+        return json.Tracks.filter(function (t) {
+            return t.Type === 'audio' && typeof t.Index === 'number' && t.Index >= 0 && Math.floor(t.Index) === t.Index;
+        });
+    }
+    function dubIndex(tracks) {
+        var result = null;
+        tracks.forEach(function (track) {
+            var title = String(track.Title || ''), language = String(track.Language || '').toLowerCase();
+            var russian = /^(ru|rus|russian|рус|русский)(?:[-_].*)?$/.test(language) ||
+                /(?:^|[^a-zа-яё])(?:ru|rus|russian|рус|русский|русская)(?:$|[^a-zа-яё])/i.test(title);
+            var dubbed = /дубляж|дублирован|дублирование|(?:^|[^a-z])dub(?:bed|bing)?(?:$|[^a-z])/i.test(title);
+            var excluded = /комментар|commentary|аудиодескрип|(?:не|без)\s+дубл|(?:not|no)\s+dub/i.test(title);
+            if (russian && dubbed && !excluded && (result === null || track.Index < result)) result = track.Index;
+        });
+        return result === null ? 0 : result;
+    }
+    function addSettings() {
+        if (!L.SettingsApi || !L.SettingsApi.addComponent || !L.SettingsApi.addParam) return;
+        L.SettingsApi.addComponent({component: settingsComponent, name: 'Звук торрентов',
+            icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 9v6h4l5 4V5L7 9H3zm12-2v2a4 4 0 0 1 0 6v2a6 6 0 0 0 0-10z"/></svg>'});
+        settingsAdded = true;
+        L.SettingsApi.addParam({component: settingsComponent,
+            param: {name: preferDubKey, type: 'trigger', default: true},
+            field: {name: 'Предпочитать русский дубляж',
+                description: 'Выбирать русскую дорожку с пометкой «Дубляж» или DUB. Иначе HLS запускается с аудиодорожкой 0.'}});
+    }
     function current(s) { return !dead && session === s; }
     function paint(s) {
         if (!current(s) || !s.tracks.length) return;
@@ -92,7 +133,7 @@
         s.data.translate.tracks = s.tracks;
         originalTracks.call(L.PlayerPanel, s.tracks);
     }
-    function playbackData(source, url) {
+    function playbackData(source, url, keepTimeline) {
         var data = {};
         Object.keys(source).forEach(function (key) { data[key] = source[key]; });
         data.url = url;
@@ -112,11 +153,109 @@
             data.timeline = {};
             Object.keys(source.timeline).forEach(function (key) { data.timeline[key] = source.timeline[key]; });
             // Restore ourselves after metadata; do not show the resume dialog.
-            data.timeline.time = 0;
-            data.timeline.percent = 0;
-            data.timeline.waiting_for_user = false;
+            if (!keepTimeline) {
+                data.timeline.time = 0;
+                data.timeline.percent = 0;
+                data.timeline.waiting_for_user = false;
+            }
         }
+        if (keepTimeline) data.continue_play = source.continue_play;
         return data;
+    }
+    function launchOpening(o, hls) {
+        if (dead || opening !== o) return;
+        cancelOpening();
+        var data = hls ? playbackData(o.originalData, o.url.href, true) : o.originalData;
+        var p = {startup: true, rollback: !hls, expected: data, previousData: o.originalData,
+            originalData: o.originalData, oldURL: o.originalData.url, time: 0, paused: false,
+            phase: 'launch', deadline: Date.now() + 60000, hlsMode: 'auto'};
+        if (hls) p.hlsMode = selectHlsEngine(data);
+        else p.hlsMode = 'rollback';
+        pending = p;
+        // Re-enter play through its public API; create() recognizes expected data.
+        // The original call was aborted before Player, ads, or video were started.
+        try {
+            var list = L.PlayerPlaylist.get().slice().map(function (item) {
+                return item.url === o.originalData.url ? data : item;
+            });
+            L.Player.play(data);
+            if (pending === p || (session && session.data === data)) L.PlayerPlaylist.set(list);
+        }
+        catch (error) {
+            if (pending !== p) return;
+            if (hls) {
+                clearRestore();
+                opening = o;
+                launchOpening(o, false);
+            } else {
+                clearRestore();
+                notify(failure('startup.fallback', error));
+            }
+        }
+    }
+    function failOpening(o, message) {
+        if (dead || opening !== o) return;
+        notify(message + ' Запускаю исходный поток.');
+        launchOpening(o, false);
+    }
+    function prepareOpening(o) {
+        if (dead || opening !== o) return;
+        o.phase = 'prepare';
+        var xhr = new XMLHttpRequest();
+        o.request = xhr;
+        xhr.open('GET', o.url.href, true);
+        xhr.timeout = 60000;
+        xhr.onload = function () {
+            if (dead || opening !== o || o.request !== xhr) return;
+            o.request = null;
+            if (xhr.status < 200 || xhr.status >= 300 || !/^\s*#EXTM3U/.test(xhr.responseText)) {
+                return failOpening(o, 'HLS не готов (HTTP ' + xhr.status + ').');
+            }
+            launchOpening(o, true);
+        };
+        xhr.onerror = xhr.ontimeout = function () {
+            if (opening === o && o.request === xhr) failOpening(o, 'HLS недоступен.');
+        };
+        try { xhr.send(); }
+        catch (error) { failOpening(o, failure('startup.prepare', error)); }
+    }
+    function create(event) {
+        var data = event && event.data;
+        if (pending && pending.expected === data) return;
+        cancelOpening();
+        reset();
+        if (!data || data.iptv || typeof data.url !== 'string' || typeof event.abort !== 'function') return;
+        var url = media(data.url);
+        // Already prepared HLS URLs and unrelated streams keep their normal launch.
+        if (!url || !/^\/stream(?:\/|$)/.test(parse(data.url).pathname)) return;
+        event.abort();
+        url.searchParams.set('audio', '0');
+        var o = {originalData: data, url: url, phase: 'probe', request: null};
+        opening = o;
+        o.timer = setTimeout(function () { failOpening(o, 'Подготовка HLS превысила 60 секунд.'); }, 60000);
+        if (!preferDub()) return prepareOpening(o);
+        var probeURL = parse(url.href);
+        probeURL.pathname = probeURL.pathname.replace(/master\.m3u8$/, 'probe');
+        probeURL.searchParams.delete('audio');
+        var xhr = new XMLHttpRequest();
+        o.request = xhr;
+        xhr.open('GET', probeURL.href, true);
+        xhr.timeout = 60000;
+        xhr.onload = function () {
+            if (dead || opening !== o || o.request !== xhr) return;
+            o.request = null;
+            try {
+                if (xhr.status < 200 || xhr.status >= 300) throw new Error('HTTP ' + xhr.status);
+                var index = dubIndex(audioTracks(JSON.parse(xhr.responseText)));
+                o.url.searchParams.set('audio', String(index));
+            } catch (error) { return failOpening(o, failure('startup.probe', error)); }
+            prepareOpening(o);
+        };
+        xhr.onerror = xhr.ontimeout = function () {
+            if (opening === o && o.request === xhr) failOpening(o, 'Не удалось получить аудиодорожки.');
+        };
+        try { xhr.send(); }
+        catch (error) { failOpening(o, failure('startup.probe', error)); }
     }
     function selectHlsEngine(data) {
         var samsung = /tizen|samsung/i.test(String(window.navigator && window.navigator.userAgent || ''));
@@ -125,15 +264,16 @@
         if (!samsung) return 'auto';
         // hls.js needs an HTML video element, not Lampa's native AVPlay object.
         var v = L.PlayerVideo.video();
-        if (!v || String(v.tagName).toLowerCase() !== 'video') {
-            notify('Torrent Audio 0.1.10: hls.js требует HTML-видеоплеер. Сохраняю обычный запуск.');
+        var nativePlayer = L.Storage.field && L.Storage.field('player') === 'tizen';
+        if (nativePlayer || (v && v.tagName && String(v.tagName).toLowerCase() !== 'video')) {
+            notify('Torrent Audio 0.2.0: hls.js требует HTML-видеоплеер. Сохраняю обычный запуск.');
             return 'auto-nonvideo';
         }
         var supported = false;
         try { supported = !!(window.Hls && typeof window.Hls.isSupported === 'function' && window.Hls.isSupported()); }
         catch (error) { failure('hls.support', error); }
         if (!supported) {
-            notify('Torrent Audio 0.1.10: hls.js недоступен или не поддерживается. Сохраняю обычный запуск.');
+            notify('Torrent Audio 0.2.0: hls.js недоступен или не поддерживается. Сохраняю обычный запуск.');
             return 'auto-unsupported';
         }
         // Per-playback Lampa option: do not change global player/HLS settings.
@@ -176,7 +316,7 @@
             return;
         }
         p.rollback = true;
-        try { restart(p, playbackData(p.previousData, p.oldURL)); }
+        try { restart(p, playbackData(p.previousData, p.oldURL, !!p.startup)); }
         catch (e) {
             clearRestore();
             notify(failure('rollback.restart', e) + '. Откройте фильм заново.');
@@ -209,14 +349,28 @@
     function restore() {
         var p = pending;
         if (!p || dead) return clearRestore();
+        if (p.phase === 'startup' && p.session && p.session.data.timeline && p.session.data.timeline.waiting_for_user) {
+            p.deadline = Date.now() + 60000;
+            return;
+        }
+        if (p.phase === 'launch') return; // Lampa may still be showing its startup UI/advert.
         if (Date.now() > p.deadline) {
             rollback((p.rollback ? 'Не удалось восстановить прежний поток. Откройте фильм заново.' : 'Новая дорожка не запустилась. Возвращаю прежний поток.') + timeoutDetails());
             return;
         }
-        if (p.phase !== 'restore' || !current(p.session)) return;
+        if ((p.phase !== 'restore' && p.phase !== 'startup') || !current(p.session)) return;
         var v = L.PlayerVideo.video();
         if (!v || !(v.duration > 0) || !isFinite(v.duration)) return;
         if (typeof v.readyState === 'number' && v.readyState < 2) return;
+        if (p.phase === 'startup') {
+            // Let Lampa handle its normal resume dialog and timeline. No seek here.
+            if (typeof p.startPosition !== 'number') p.startPosition = v.currentTime;
+            if (v.currentTime > p.startPosition + 0.2) {
+                clearRestore();
+                paint(p.session);
+            }
+            return;
+        }
         // An accepted currentTime assignment alone does not prove playback.
         // Keep the watchdog until the new stream actually advances.
         if (p.resumeRequested) {
@@ -273,7 +427,8 @@
         var u = parse(s.hlsURL);
         if (!u) return;
         u.searchParams.set('audio', String(index));
-        var p = {session: s, previousData: s.data, oldURL: s.data.url, time: v.currentTime,
+        var previousData = s.originalData || s.data;
+        var p = {session: s, previousData: previousData, oldURL: previousData.url, originalData: s.originalData, time: v.currentTime,
             paused: !!v.paused, deadline: Date.now() + 60000, phase: 'prepare', attempted: false};
         pending = p;
         restoreTimer = setInterval(restore, 500);
@@ -318,10 +473,7 @@
             try {
                 if (xhr.status < 200 || xhr.status >= 300) throw new Error('HTTP');
                 var json = JSON.parse(xhr.responseText);
-                if (!Array.isArray(json.Tracks)) throw new Error('Tracks');
-                s.tracks = json.Tracks.filter(function (t) {
-                    return t.Type === 'audio' && typeof t.Index === 'number' && t.Index >= 0 && Math.floor(t.Index) === t.Index;
-                }).map(function (t) {
+                s.tracks = audioTracks(json).map(function (t) {
                     return {
                         index: t.Index,
                         name: t.Title || 'Дорожка ' + (t.Index + 1),
@@ -348,17 +500,18 @@
         if (!data || data.iptv || typeof data.url !== 'string') return;
         var u = media(data.url);
         if (!u) return;
-        // Do not force audio=0 or replace a working direct stream on startup.
-        // The HLS gateway is activated only by an explicit track selection.
         var direct = /\/stream(?:\/|\?)/.test(data.url);
         var s = {data: data, hlsURL: u.href, audio: direct ? null : Number(u.searchParams.get('audio') || 0), tracks: []};
         s.hlsMode = transition ? transition.hlsMode : 'auto';
+        s.originalData = transition && !transition.rollback ? transition.originalData || null : null;
         session = s;
         if (transition) {
             transition.session = s;
             transition.restarting = false;
-            transition.phase = 'restore';
+            transition.phase = transition.startup ? 'startup' : 'restore';
+            transition.startPosition = undefined;
             transition.deadline = Date.now() + 60000;
+            if (!restoreTimer) restoreTimer = setInterval(restore, 500);
         }
         loadTracks(s);
     }
@@ -367,28 +520,38 @@
         L = window.Lampa;
         if (!L || !window.appready) { retry = setTimeout(init, 500); return; }
         if (!L.PlayerPlaylist || !L.PlayerPlaylist.get || !L.PlayerPlaylist.set || !L.PlayerPlaylist.listener || !L.PlayerPlaylist.listener.send ||
-            !L.Player || !L.Player.listener || !L.PlayerPanel || !L.PlayerPanel.setTracks ||
+            !L.Player || !L.Player.play || !L.Player.listener || !L.PlayerPanel || !L.PlayerPanel.setTracks ||
             !L.PlayerVideo || !L.PlayerVideo.listener || !L.PlayerVideo.video || !L.PlayerVideo.url ||
             !L.PlayerVideo.destroy || !L.PlayerVideo.pause || !L.PlayerVideo.play || !window.URL || !window.URLSearchParams) {
             notify('Torrent Audio: эта версия Lampa или браузера не поддерживается.');
             return;
         }
         initialized = true;
+        addSettings();
         originalTracks = L.PlayerPanel.setTracks;
         tracksWrapper = function (tracks) {
             return originalTracks.call(this, session && session.tracks.length ? session.tracks : tracks);
         };
         L.PlayerPanel.setTracks = tracksWrapper;
+        listen(L.Player.listener, 'create', create);
         listen(L.Player.listener, 'start', start);
-        listen(L.Player.listener, 'destroy', function () { reset(!!(pending && pending.restarting)); });
-        listen(L.Player.listener, 'close', function () { reset(); });
+        listen(L.Player.listener, 'destroy', function () { cancelOpening(); reset(!!(pending && pending.restarting)); });
+        listen(L.Player.listener, 'close', function () { cancelOpening(); reset(); });
         listen(L.PlayerVideo.listener, 'canplay', restore);
         listen(L.PlayerVideo.listener, 'loadeddata', restore);
         listen(L.PlayerVideo.listener, 'error', function (event) {
             var p = pending;
-            if (!p || p.phase !== 'restore') return;
+            if (p && p.phase !== 'restore' && p.phase !== 'startup') return;
             var v = L.PlayerVideo.video();
             var mediaError = v && v.error;
+            var fatal = !(event && event.fatal === false && !(mediaError && mediaError.code));
+            if (!p) {
+                if (!session || !session.originalData || !fatal) return;
+                // Keep the original direct URL available even after startup succeeded.
+                p = {session: session, previousData: session.originalData, oldURL: session.originalData.url,
+                    time: v && isFinite(v.currentTime) ? v.currentTime : 0, paused: !!(v && v.paused), phase: 'restore'};
+                pending = p;
+            }
             var reason = event && event.error || mediaError;
             if (reason && typeof reason === 'object') {
                 reason = {name: reason.name || 'MediaError',
@@ -397,7 +560,7 @@
             }
             failure('stream', reason || 'Плеер не передал причину ошибки');
             p.streamError = lastError.message;
-            p.streamFatal = !(event && event.fatal === false && !(mediaError && mediaError.code));
+            p.streamFatal = fatal;
             // hls.js also reports recoverable warnings through Lampa's error bus.
             // Allow its recovery to run; the existing deadline still bounds waiting.
             if (!p.streamFatal) return;
@@ -406,7 +569,7 @@
         });
     }
     window[KEY] = {
-        version: '0.1.10',
+        version: '0.2.0',
         getStatus: status,
         getLastStatus: function () { return lastStatus ? JSON.parse(JSON.stringify(lastStatus)) : null; },
         getLastError: function () {
@@ -424,10 +587,12 @@
         destroy: function () {
             dead = true;
             clearTimeout(retry);
+            cancelOpening();
             reset();
             bindings.forEach(function (b) { if (b[0].remove) b[0].remove(b[1], b[2]); });
             bindings = [];
             if (initialized && L.PlayerPanel.setTracks === tracksWrapper) L.PlayerPanel.setTracks = originalTracks;
+            if (settingsAdded && L.SettingsApi && L.SettingsApi.removeComponent) L.SettingsApi.removeComponent(settingsComponent);
         }
     };
     init();
