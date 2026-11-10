@@ -1,6 +1,6 @@
 (function (root) {
     'use strict';
-    var VERSION = '0.3.0';
+    var VERSION = '0.3.1';
     function absolute(value, base) {
         if (typeof value !== 'string' || !value.trim()) return '';
         try { var u = new URL(value, base); return /^https?:$/.test(u.protocol) ? u.href : ''; } catch (e) { return ''; }
@@ -870,6 +870,7 @@
         var filter = stored('filter_' + activePlaylist().id, 'all'), query = stored('query', '');
         function node(tag, cls, text) { var el = $('<' + tag + '></' + tag + '>').addClass(cls); if (text !== undefined) el.text(text); return el; }
         function reveal(name, el) { if (scrolls[name]) scrolls[name].update(el, true); else if (el && el.scrollIntoView) el.scrollIntoView({block: 'nearest'}); }
+        function navigator() { return root.Navigator || L.Navigator; }
         function activate(name, el) {
             if (!html || dead) return; area = name;
             var target = name === 'side' ? side : name === 'rows' ? rows : details;
@@ -922,7 +923,12 @@
                 rows.append(row); rowItems.push(row);
                 if (index < 10) loadLogo(c, row);
             }(i));
+            var added = rowItems.slice(rendered, end).map(function (item) { return item[0]; });
             rendered = end;
+            if (area === 'rows' && !paused && L.Controller.own && L.Controller.own(self)) {
+                L.Controller.collectionAppend(added);
+                if (L.Layer) L.Layer.update(html[0]);
+            }
         }
         function drawRows() {
             rows.empty(); if (scrolls.rows) scrolls.rows.reset(); rendered = 0; rowItems = []; focus.rows = null;
@@ -1016,8 +1022,8 @@
                 toggle: function () { activate(area); },
                 left: function () { if (area === 'details') activate('rows'); else if (area === 'rows') activate('side'); else L.Controller.toggle('menu'); },
                 right: function () { if (area === 'side' && collection.length) activate('rows'); else if (area === 'rows' && details.find('.selector').length) activate('details'); },
-                up: function () { if (L.Navigator.canmove('up')) L.Navigator.move('up'); else if (area === 'side') L.Controller.toggle('head'); },
-                down: function () { L.Navigator.move('down'); },
+                up: function () { if (navigator().canmove('up')) navigator().move('up'); else if (area === 'side') L.Controller.toggle('head'); },
+                down: function () { navigator().move('down'); },
                 back: function () { if (area === 'details') activate('rows'); else if (area === 'rows') activate('side'); else L.Activity.backward(); }
             });
             L.Controller.toggle('content'); startTimer();
