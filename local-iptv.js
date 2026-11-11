@@ -1,6 +1,6 @@
 (function (root) {
     'use strict';
-    var VERSION = '0.3.1';
+    var VERSION = '0.3.2';
     function absolute(value, base) {
         if (typeof value !== 'string' || !value.trim()) return '';
         try { var u = new URL(value, base); return /^https?:$/.test(u.protocol) ? u.href : ''; } catch (e) { return ''; }
@@ -560,10 +560,10 @@
     }(), t;
   }();
 
-    var exported = {parse: parse, parsePlaylist: parsePlaylist, GuideParser: GuideParser, xmlDate: xmlDate, programsFor: programsFor, programPosition: programPosition, progress: progress, archiveURL: archiveURL, UnpackStream: UnpackStream};
+    var exported = {parse: parse, parsePlaylist: parsePlaylist, GuideParser: GuideParser, xmlDate: xmlDate, programsFor: programsFor, programPosition: programPosition, progress: progress, archiveURL: archiveURL, UnpackStream: UnpackStream, guideURL: guideURL, guideRequestURL: guideRequestURL};
     if (typeof module === 'object' && module.exports) { module.exports = exported; return; }
     if (root.LampaLocalIPTV) return;
-    var L, ready = false, dead = false, channels = [], guides = [], guide = emptyGuide(), guideState = '', lastError = '', menu, style, screen = null;
+    var L, ready = false, dead = false, channels = [], guides = [], guide = emptyGuide(), guideState = '', guideUpdated = 0, lastError = '', menu, style, screen = null;
     var prefix = 'local_iptv_', xhr = null, guideXHR = null, generation = 0, guideToken = 0, guideTimer = null, refreshTimer = null, playerCleanup = null, origin = 'menu';
     var dbPromise = null;
     function emptyGuide() { return {programs: Object.create(null), names: Object.create(null), logos: Object.create(null)}; }
@@ -674,8 +674,29 @@
             var p = activePlaylist(); p.url = value; updatePlaylist(p); safeSave('url', value); cancel(); channels = []; guide = emptyGuide(); guides = []; home(); load();
         });
     }
+    function guideURL(url, playlist) {
+        // This large public feed is filtered by our relay before it reaches the TV.
+        try {
+            var feed = new URL(url), server = new URL(playlist);
+            var local = /^(localhost|127\.|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(server.hostname) || /\.local$/.test(server.hostname);
+            if (feed.hostname === 'epg.uspeh.my' && feed.pathname === '/epg.xml.gz' && local && server.port === '8088' && server.pathname === '/playlist.m3u') return server.origin + '/epg.xml.gz';
+        } catch (ignored) {}
+        return url;
+    }
+    function guideRequestURL(url, force) {
+        if (!force) return url;
+        try {
+            var parsed = new URL(url);
+            // Only our relay understands this refresh parameter.
+            if (parsed.pathname === '/epg.xml.gz' && parsed.port === '8088') {
+                parsed.searchParams.set('refresh', '1');
+                return parsed.href;
+            }
+        } catch (ignored) {}
+        return url;
+    }
     function loadGuide(force) {
-        stopGuide(); var p = activePlaylist(), url = p.epg || guides[0], token = guideToken, playlistToken = generation;
+        stopGuide(); var p = activePlaylist(), url = guideURL(p.epg || guides[0], p.url), token = guideToken, playlistToken = generation;
         var signature = channels.map(function (c) { return (c.tvg && c.tvg.id || '') + '|' + normalize(c.tvg && c.tvg.name || c.name); }).join('\n');
         if (!url || !channels.length) { guideState = 'Укажите адрес XMLTV в настройках плейлиста'; if (screen) screen.updateDetails(); return; }
         guideState = 'Загрузка телепрограммы…'; if (screen) screen.updateDetails();
@@ -683,12 +704,12 @@
         cache('guide:' + p.id).then(function (saved) {
             if (!current()) return;
             if (saved && saved.url === url && saved.signature === signature) {
-                guide = saved.data; if (screen) screen.updateDetails();
-                if (saved.time > Date.now() - 12 * 3600000 && !force) { guideState = ''; if (screen) screen.updateDetails(); return; }
+                guide = saved.data; guideUpdated = saved.time; if (screen) screen.updateDetails();
+                if (saved.time > Date.now() - 6 * 3600000 && !force) { guideState = ''; if (screen) screen.updateDetails(); return; }
             }
             var request = new XMLHttpRequest(); guideXHR = request;
             function fail(message) { if (!current()) return; guideXHR = null; guideState = message; if (screen) screen.updateDetails(); if (force) notify(message); }
-            try { request.open('GET', url, true); request.responseType = 'arraybuffer'; } catch (e) { return fail('Не удалось открыть EPG'); }
+            try { request.open('GET', guideRequestURL(url, force), true); request.responseType = 'arraybuffer'; } catch (e) { return fail('Не удалось открыть EPG'); }
             request.timeout = 90000;
             request.onprogress = function (e) { if (e.loaded > 32 * 1024 * 1024) { request.abort(); fail('Файл EPG превышает 32 МБ'); } };
             request.onerror = function () { fail('Нет доступа к EPG: проверьте CORS и HTTP/HTTPS'); };
@@ -708,7 +729,7 @@
                             var end = Math.min(bytes.length, pos + 32768), final = end === bytes.length;
                             unzip.push(bytes.subarray(pos, end), final); pos = end;
                             if (!final) guideTimer = setTimeout(next, 0);
-                            else { guide = parser.push('', true); guideState = ''; cache('guide:' + p.id, {url: url, time: Date.now(), signature: signature, data: guide}); if (screen) screen.updateDetails(); if (force) notify('Телепрограмма обновлена'); }
+                            else { guide = parser.push('', true); guideUpdated = Date.now(); guideState = ''; cache('guide:' + p.id, {url: url, time: Date.now(), signature: signature, data: guide}); if (screen) screen.updateDetails(); if (force) notify('Телепрограмма обновлена'); }
                         } catch (e) { fail(e.message || 'Не удалось разобрать XMLTV'); }
                     }
                     next();
@@ -1076,7 +1097,8 @@
             if (!screen || xhr || playerCleanup || !screen.isActive()) return;
             if (L.Controller.enabled && L.Controller.enabled().name !== 'content') return;
             var p = activePlaylist(), updated = stored('updated_' + p.id, 0);
-            if (p.update > 0 && updated && Date.now() - updated > p.update * 3600000) load();
+            if (p.update > 0 && updated && Date.now() - updated > p.update * 3600000) return load();
+            if ((p.epg || guides[0]) && !guideXHR && !guideTimer && Date.now() - guideUpdated >= 6 * 3600000) loadGuide(false);
         }, 60000);
     }
     function app(event) { if (event.type === 'ready') init(); }
